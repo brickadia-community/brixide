@@ -15,3 +15,8 @@ Plugins work over JSON RPC. For reference, see `ping_pong_plugin` under the base
 this repository.
 
 *TODO: define the RPC spec and `plugin.toml` spec here*
+
+## Credits
+
+* voximity - creator/maintainer
+* [Meshiest](https://github.com/Meshiest) - [Omegga](https://github.com/brickadia-community/omegga), huge inspiration and borrowed logic/Regex/tools/etc.

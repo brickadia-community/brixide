@@ -5,6 +5,7 @@ use tokio::{io::{self, AsyncBufReadExt, BufReader}, sync::mpsc::{self, Unbounded
 
 pub mod logging;
 pub mod payloads;
+pub mod player;
 pub mod rpc;
 
 #[derive(Serialize, Deserialize, Debug)]

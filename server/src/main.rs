@@ -1,18 +1,20 @@
-use std::{fs, path::Path, process::exit};
+use std::{collections::HashMap, fs, path::Path, process::exit};
 
 use clap::{App, Arg, SubCommand};
 use dialoguer::{Input, Password, theme::ColorfulTheme};
 use fern::{Dispatch, colors::{Color, ColoredLevelConfig}};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use plugin::{payloads::*, rpc};
 use regex::Regex;
 use tokio::{io::{self, AsyncBufReadExt}, sync::mpsc};
 
-use crate::{plugins::PluginInstance, server::Server};
+use crate::{matchers::*, plugins::PluginInstance, server::Server};
 
+mod matchers;
+mod plugins;
 mod server;
 mod wsl;
-mod plugins;
+
 
 #[tokio::main]
 async fn main() {
@@ -50,6 +52,9 @@ async fn main() {
             .short("p")
             .help("Change the port the server will run on")
             .default_value("7777"))
+        .arg(Arg::with_name("server-verbose")
+            .long("server-verbose")
+            .help("Display all logs from the Brickadia server"))
         .subcommand(SubCommand::with_name("install")
             .about("Forcefully install the Brickadia launcher"))
         .subcommand(SubCommand::with_name("uninstall")
@@ -155,6 +160,7 @@ async fn main() {
     if let Some(email) = credentials.0 { launch_args.push(format!("-User={}", email)); }
     if let Some(password) = credentials.1 { launch_args.push(format!("-Password={}", password)); }
 
+    let is_server_verbose = matches.is_present("server-verbose");
     let mut server = Server::start(&launch_args, stdin_receiver).unwrap();
     
     info!("Server active");
@@ -163,19 +169,108 @@ async fn main() {
     let reader = io::BufReader::new(stdout);
     let mut lines = reader.lines();
 
-    let chat_regex = Regex::new("LogChat: (?P<user>[^:]+): (?P<message>.*)$").unwrap();
+    let log_matcher = Regex::new("^\\[[\\d\\.\\-:]+\\]\\[\\s*(?P<index>\\d+)\\](?P<body>.+)$").unwrap();
+    
+    let regex_matchers = vec![ChatRegexMatcher];
+    let grouped_regex_matchers = vec![JoinRegexGroupMatcher];
+
+    let mut grouped_regex_instances: Vec<GroupedRegexMatches<'_, JoinRegexGroupMatcher>> = vec![];
 
     // repeatedly listen to stdout for new content
     while let Some(line) = lines.next_line().await.unwrap() {
-        if let Some(capture) = chat_regex.captures(line.as_str()) {
-            let user = &capture["user"];
-            let message = &capture["message"];
+        if is_server_verbose {
+            debug!(":: {}", line);
+        }
 
-            info!("{}: {}", user, message);
+        let log_match = match log_matcher.captures(line.as_str()) {
+            Some(x) => x,
+            None => continue
+        };
 
-            let rpc_message: rpc::Message = ChatPayload { user: user.into(), message: message.into() }.into();
-            for instance in instances.iter() {
-                instance.stdin.send(serde_json::to_string(&rpc_message).unwrap()).unwrap();
+        let index: i32 = (&log_match["index"]).parse().unwrap();
+        let body = &log_match["body"];
+
+        // handle each regex matcher
+        for matcher in regex_matchers.iter() {
+            if let Some(captures) = matcher.regex().captures(body) {
+                let rpc_message = matcher.convert(captures).await;
+
+                for instance in instances.iter() {
+                    instance.stdin.send(serde_json::to_string(&rpc_message).unwrap()).unwrap();
+                }
+            }
+        }
+
+        // handle each grouped regex instance, and break if one is matched
+        let mut i: usize = 0;
+        for instance in grouped_regex_instances.iter_mut() {
+            if index == instance.index {
+                let regexes = instance.matcher.regexes();
+                let next_regex = &regexes[instance.captures.len()];
+
+                let capture_names = next_regex.capture_names();
+                if let Some(captures) = next_regex.captures(body) {
+                    // clone out captures into a map for ownership
+                    let mut map = HashMap::new();
+
+                    for group_name in capture_names {
+                        let group_name = match group_name {
+                            Some(x) => x,
+                            None => continue
+                        };
+                        let m = captures.name(group_name).unwrap().as_str().clone();
+                        map.insert(String::from(group_name), String::from(m));
+                    }
+                    
+                    // we have our map, update the instance
+                    instance.captures.push(map);
+
+                    // if our captures count is >= the regex count, our job here is done:
+                    // submit the rpc message
+                    if instance.captures.len() >= regexes.len() {
+                        let rpc_message = instance.matcher.convert(&instance).await;
+
+                        for instance in instances.iter() {
+                            instance.stdin.send(serde_json::to_string(&rpc_message).unwrap()).unwrap();
+                        }
+
+                        break;
+                    }
+                }
+            }
+
+            i += 1;
+        }
+
+        // loop terminated early somewhere, so we remove it at its index
+        if i < grouped_regex_instances.len() {
+            grouped_regex_instances.remove(i);
+            continue;
+        }
+
+        // handle each grouped regex matcher, trying to start new instances if possible
+        for matcher in grouped_regex_matchers.iter() {
+            let first_regex = &matcher.regexes()[0];
+
+            let capture_names = first_regex.capture_names();
+            if let Some(captures) = first_regex.captures(body) {
+                // effectively clone out captures into a map for ownership
+                let mut map = HashMap::new();
+
+                for group_name in capture_names {
+                    let group_name = match group_name {
+                        Some(x) => x,
+                        None => continue
+                    };
+                    let m = captures.name(group_name).unwrap().as_str().clone();
+                    map.insert(String::from(group_name), String::from(m));
+                }
+
+                // we match with the first regex, so let's start making a new instance
+                let instance = GroupedRegexMatches { index, matcher, captures: vec![map] };
+
+                // add it to the instances array
+                grouped_regex_instances.push(instance);
             }
         }
     }
