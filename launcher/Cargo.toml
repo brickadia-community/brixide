@@ -1,0 +1,14 @@
+[package]
+name = "launcher"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.41"
+clap = "2.33.3"
+fern = { version = "0.6.0", features = ["colored"] }
+log = "0.4.14"
+reqwest = "0.11"
+tokio = { version = "1.8.0", features = ["full"] }

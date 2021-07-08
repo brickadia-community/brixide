@@ -1,0 +1,5 @@
+[plugin]
+name = "Ping Pong Plugin"
+author = "x"
+description = "A sample plugin. Ping/pong back and forth with the game."
+target = "target/debug/ping_pong_plugin"
