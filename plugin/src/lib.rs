@@ -1,4 +1,3 @@
-use log::debug;
 use logging::PluginLogger;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

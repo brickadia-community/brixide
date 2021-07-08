@@ -1,25 +1,11 @@
 use std::{convert::TryInto, path::PathBuf, process::Stdio, sync::Arc};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use log::{debug, error, info, trace, warn};
 use plugin::{Plugin, logging::LogSeverity, payloads, rpc};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::{fs::{self, File}, io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStdin, Command}, sync::Mutex};
-
-pub struct ServerStdinContainer {
-    pub stdin: Option<ChildStdin>
-}
-
-impl ServerStdinContainer {
-    pub fn new() -> Self {
-        ServerStdinContainer { stdin: None }
-    }
-
-    pub fn set(&mut self, stdin: ChildStdin) {
-        self.stdin = Some(stdin);
-    }
-}
+use tokio::{fs::{self, File}, io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt}, process::{Child, Command}, sync::{Mutex, mpsc}};
 
 /// Represents the configuration of the plugin.
 #[derive(Deserialize)]
@@ -43,19 +29,11 @@ impl PluginConfig {
 pub struct PluginInstance {
     pub config: Arc<PluginConfig>,
     pub process: Arc<Mutex<Child>>,
-    pub stdin: Arc<Mutex<ChildStdin>>
+    pub stdin: mpsc::UnboundedSender<String>
 }
 
 impl PluginInstance {
-    async fn send(stdin: Arc<Mutex<ServerStdinContainer>>, content: &mut String) -> Result<()> {
-        content.push('\n');
-        let mut locked = stdin.lock().await;
-        let stdin = &mut locked.stdin.as_mut().ok_or(anyhow!("no server stdin is available"))?;
-        stdin.write_all(&content[..].as_bytes()).await?;
-        Ok(())
-    }
-
-    pub fn start(config: PluginConfig, stdin_arc: Arc<Mutex<ServerStdinContainer>>) -> Result<PluginInstance> {
+    pub fn start(config: PluginConfig, server_stdin: mpsc::UnboundedSender<String>) -> Result<PluginInstance> {
         if config.path.is_none() {
             bail!("no plugin path found");
         }
@@ -70,14 +48,27 @@ impl PluginInstance {
             .stderr(Stdio::piped())
             .spawn()?;
 
-        let mut child_stdin = child.stdin.take().unwrap();
-        let mut child_stdout = child.stdout.take().unwrap(); // this will be moved into the thread handling the plugin
+        let mut child_stdin = child.stdin.take().unwrap(); // this will be moved into the task that listens for stdin
+        let child_stdout = child.stdout.take().unwrap(); // this will be moved into the task handling the plugin
+        
+        // sending to stdin task
+        let (sender, mut receiver) = mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Some(mut x) = receiver.recv().await {
+                x.push('\n');
+                match child_stdin.write_all(&x[..].as_bytes()).await {
+                    Ok(_) => (),
+                    Err(_) => break
+                }
+            }
+        });
 
         let config_arc = Arc::new(config);
         let child_mtx = Arc::new(Mutex::new(child));
-        
+
+        // reading stdout task
         let config_thread_arc = config_arc.clone();
-        let child_thread_mtx = child_mtx.clone();
+        let _child_thread_mtx = child_mtx.clone(); // is this necessary?
         tokio::spawn(async move {
             let reader = io::BufReader::new(child_stdout);
             let mut lines = reader.lines();
@@ -108,7 +99,7 @@ impl PluginInstance {
                         if let rpc::Message::Notification { params, .. } = rpc_message {
                             match params {
                                 Some(Value::String(str)) => {
-                                    Self::send(stdin_arc.clone(), &mut format!("Chat.Broadcast {}", str)).await.unwrap();
+                                    server_stdin.send(format!("Chat.Broadcast {}", str)).unwrap();
                                 },
                                 _ => ()
                             }
@@ -119,7 +110,7 @@ impl PluginInstance {
             }
         });
 
-        Ok(PluginInstance { config: config_arc, process: child_mtx, stdin: Arc::new(Mutex::new(child_stdin)) })
+        Ok(PluginInstance { config: config_arc, process: child_mtx, stdin: sender })
     }
 }
 

@@ -1,19 +1,20 @@
 use std::env;
 use std::process::Stdio;
 
-use tokio::process::{Command, Child};
+use log::{debug, error};
+use tokio::{io::AsyncWriteExt, process::{Command, Child}, sync::mpsc, task::JoinHandle};
 
 pub struct Server {
-    pub child: Child
+    pub child: Child,
+    pub stdin_task: JoinHandle<()>
 }
 
 impl Server {
-    #[cfg(not(target_os = "windows"))]
-    pub fn start(args: &Vec<String>) -> Result<Self, std::io::Error> {
+    pub fn start(args: &Vec<String>, mut stdin_receiver: mpsc::UnboundedReceiver<String>) -> Result<Self, std::io::Error> {
         let mut data_location = env::current_dir()?;
         data_location.push("data");
 
-        let child = Command::new("stdbuf")
+        let mut child = Command::new("stdbuf")
             .env("LD_LIBRARY_PATH", format!("{}:$LD_LIBRARY_PATH", launcher::LAUNCHER_PATH))
             .arg("--output=L")
             .arg("--")
@@ -28,29 +29,21 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-
-        Ok(Server { child })
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn start(args: &Vec<String>) -> Result<Self, std::io::Error> {
-        use std::os::windows::process::CommandExt;
-
-        let mut data_location = env::current_dir()?;
-        data_location.push("data");
-
-        let child = Command::new(format!("{}{}", launcher::INSTALL_LOCATION, "/BrickadiaLauncher/BrickadiaLauncher.exe"))
-            .arg("--server")
-            .arg("--")
-            .arg("-NotInstalled")
-            .arg("-log")
-            .arg(format!("-UserDir={}", data_location.to_str().unwrap()))
-            .args(args)
-            //.stdout(Stdio::piped())
-            //.stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
         
-        Ok(Server { child })
+        let mut stdin = child.stdin.take().unwrap();
+        let stdin_task = tokio::spawn(async move {
+            while let Some(mut line) = stdin_receiver.recv().await {
+                line.push('\n');
+
+                // write to stdin, killing task if we fail to write
+                match stdin.write_all(&line[..].as_bytes()).await {
+                    Ok(_) => (),
+                    Err(_) => break
+                }
+            }
+            error!("server stdin task died");
+        });
+
+        Ok(Server { child, stdin_task })
     }
 }

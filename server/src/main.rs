@@ -1,14 +1,14 @@
-use std::{fs, io::Read, path::Path, process::exit, sync::Arc, time::Duration};
+use std::{fs, path::Path, process::exit};
 
 use clap::{App, Arg, SubCommand};
 use dialoguer::{Input, Password, theme::ColorfulTheme};
 use fern::{Dispatch, colors::{Color, ColoredLevelConfig}};
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use plugin::{payloads::*, rpc};
 use regex::Regex;
-use tokio::{io::{self, AsyncBufReadExt, AsyncWriteExt}, process::ChildStdin, sync::Mutex};
+use tokio::{io::{self, AsyncBufReadExt}, sync::mpsc};
 
-use crate::{plugins::{PluginInstance, ServerStdinContainer}, server::Server};
+use crate::{plugins::PluginInstance, server::Server};
 
 mod server;
 mod wsl;
@@ -123,38 +123,31 @@ async fn main() {
         warn!("If the server asks for your credentials next time, your credentials were inputted incorrectly");
     }
 
-    let mut server_stdin_arc = Arc::new(Mutex::new(ServerStdinContainer::new()));
+    // prepare the stdin channel
+    let (stdin_sender, stdin_receiver) = mpsc::unbounded_channel::<String>();
 
-    info!("Scanning for plugins...");
     let plugins = plugins::scan().await;
-    let instances = Arc::new(Mutex::new(vec![]));
+    let mut instances = vec![];
     for plugin_config in plugins {
-        let instance = match PluginInstance::start(plugin_config, server_stdin_arc.clone()) {
+        let instance = match PluginInstance::start(plugin_config, stdin_sender.clone()) {
             Ok(i) => i,
             Err(x) => {
                 warn!("Plugin failed to start: {:?}", x);
                 continue;
             }
         };
-        instances.lock().await.push(instance);
+        instances.push(instance);
     }
 
-    async fn broadcast_rpc(instances: Arc<Mutex<Vec<PluginInstance>>>, message: rpc::Message) {
-        let mut line = serde_json::to_string(&message).unwrap();
-        line.push('\n');
-
-        for instance in instances.lock().await.iter() {
-            instance.stdin.lock().await.write_all(&line[..].as_bytes()).await.unwrap();
-        }
-    }
+    info!("Started {} plugins", instances.len());
 
     // check if we're rocking WSL, and if we are, start the udp proxy
-    let mut udp_proxy: Option<wsl::UdpProxy> = None;
+    let mut _udp_proxy: Option<wsl::UdpProxy> = None;
 
     if wsl::is_wsl() {
         let ip = wsl::ip().await.expect("Failed to get WSL IP");
         info!("Detected WSL, starting UDP proxy on {}", ip);
-        udp_proxy = Some(wsl::UdpProxy::spawn(ip, port).await.unwrap());
+        _udp_proxy = Some(wsl::UdpProxy::spawn(ip, port).await.unwrap());
     }
 
     // at this point the launcher should be installed, so we can create a server instance and start reading from it
@@ -162,19 +155,17 @@ async fn main() {
     if let Some(email) = credentials.0 { launch_args.push(format!("-User={}", email)); }
     if let Some(password) = credentials.1 { launch_args.push(format!("-Password={}", password)); }
 
-    let mut server = Server::start(&launch_args).unwrap();
+    let mut server = Server::start(&launch_args, stdin_receiver).unwrap();
     
     info!("Server active");
 
     let stdout = server.child.stdout.take().unwrap();
-    let stdin = server.child.stdin.take().unwrap();
     let reader = io::BufReader::new(stdout);
     let mut lines = reader.lines();
 
-    server_stdin_arc.lock().await.set(stdin);
-
     let chat_regex = Regex::new("LogChat: (?P<user>[^:]+): (?P<message>.*)$").unwrap();
 
+    // repeatedly listen to stdout for new content
     while let Some(line) = lines.next_line().await.unwrap() {
         if let Some(capture) = chat_regex.captures(line.as_str()) {
             let user = &capture["user"];
@@ -183,7 +174,9 @@ async fn main() {
             info!("{}: {}", user, message);
 
             let rpc_message: rpc::Message = ChatPayload { user: user.into(), message: message.into() }.into();
-            broadcast_rpc(instances.clone(), rpc_message).await;
+            for instance in instances.iter() {
+                instance.stdin.send(serde_json::to_string(&rpc_message).unwrap()).unwrap();
+            }
         }
     }
 }
