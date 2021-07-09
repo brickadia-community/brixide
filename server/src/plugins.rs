@@ -1,11 +1,15 @@
-use std::{convert::TryInto, path::PathBuf, process::Stdio, sync::Arc};
+use std::{convert::TryInto, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use anyhow::{Result, bail};
+use lazy_static::lazy_static;
 use log::{debug, error, info, trace, warn};
 use plugin::{Plugin, logging::LogSeverity, payloads, rpc};
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::{fs::{self, File}, io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt}, process::{Child, Command}, sync::{Mutex, mpsc}};
+use tokio::{fs::{self, File}, io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt}, process::{Child, Command}, sync::{Mutex, mpsc::{self, UnboundedSender}, oneshot}, time::Instant};
+
+use crate::matchers::{GroupedRegexMatcher, GroupedRegexMatches, PluginRegexMatcher, RegexCaptures};
 
 /// Represents the configuration of the plugin.
 #[derive(Deserialize)]
@@ -25,6 +29,13 @@ impl PluginConfig {
     }
 }
 
+/// A group of channels each plugin should have access to.
+#[derive(Clone)]
+pub struct PluginChannels<'a> {
+    pub stdin: mpsc::UnboundedSender<String>,
+    pub matchers: mpsc::UnboundedSender<GroupedRegexMatches<'a>>
+}
+
 /// Represents an instance of the plugin running.
 pub struct PluginInstance {
     pub config: Arc<PluginConfig>,
@@ -33,7 +44,7 @@ pub struct PluginInstance {
 }
 
 impl PluginInstance {
-    pub fn start(config: PluginConfig, server_stdin: mpsc::UnboundedSender<String>) -> Result<PluginInstance> {
+    pub fn start(config: PluginConfig, channels: &PluginChannels<'_>) -> Result<PluginInstance> {
         if config.path.is_none() {
             bail!("no plugin path found");
         }
@@ -69,9 +80,22 @@ impl PluginInstance {
         // reading stdout task
         let config_thread_arc = config_arc.clone();
         let _child_thread_mtx = child_mtx.clone(); // is this necessary?
+
+        let game_stdin = channels.stdin.clone();
+        let regex_matchers = channels.matchers.clone();
         tokio::spawn(async move {
             let reader = io::BufReader::new(child_stdout);
             let mut lines = reader.lines();
+
+            async fn match_regex(matchers_channel: UnboundedSender<GroupedRegexMatches<'_>>, regexes: Vec<Regex>, timeout: Duration) -> Option<RegexCaptures> {
+                let (sender, mut receiver) = mpsc::channel(1);
+                let matcher = PluginRegexMatcher { regexes, capture_sender: sender };
+                let matcher_arc = Arc::new(matcher);
+                let instance = GroupedRegexMatches { matcher: matcher_arc.clone(), index: None, captures: RegexCaptures::default(), last: Instant::now(), timeout };
+                matchers_channel.send(instance).unwrap();
+
+                receiver.recv().await
+            }
 
             // truth be told, if this thread panics, it doesn't really matter because the plugin died in some regard
             // todo: handle this a little bit better
@@ -99,7 +123,7 @@ impl PluginInstance {
                         if let rpc::Message::Notification { params, .. } = rpc_message {
                             match params {
                                 Some(Value::String(str)) => {
-                                    server_stdin.send(format!("Chat.Broadcast {}", str)).unwrap();
+                                    game_stdin.send(format!("Chat.Broadcast {}", str)).unwrap();
                                 },
                                 _ => ()
                             }
@@ -109,7 +133,7 @@ impl PluginInstance {
                         // write a line directly to the server stdin
                         if let rpc::Message::Notification { params, .. } = rpc_message {
                             match params {
-                                Some(Value::String(str)) => server_stdin.send(str).unwrap(),
+                                Some(Value::String(str)) => game_stdin.send(str).unwrap(),
                                 _ => ()
                             }
                         }

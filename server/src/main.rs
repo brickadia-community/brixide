@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path, process::exit};
+use std::{collections::HashMap, fs, path::Path, process::exit, sync::Arc, time::Duration};
 
 use clap::{App, Arg, SubCommand};
 use dialoguer::{Input, Password, theme::ColorfulTheme};
@@ -6,9 +6,9 @@ use fern::{Dispatch, colors::{Color, ColoredLevelConfig}};
 use log::{debug, error, info, warn};
 use plugin::{payloads::*, rpc};
 use regex::Regex;
-use tokio::{io::{self, AsyncBufReadExt}, sync::mpsc};
+use tokio::{io::{self, AsyncBufReadExt}, sync::mpsc, time::Instant};
 
-use crate::{matchers::*, plugins::PluginInstance, server::Server};
+use crate::{matchers::*, plugins::{PluginChannels, PluginInstance}, server::Server};
 
 mod matchers;
 mod plugins;
@@ -128,13 +128,17 @@ async fn main() {
         warn!("If the server asks for your credentials next time, your credentials were inputted incorrectly");
     }
 
-    // prepare the stdin channel
+    // prepare the stdin channel (receives info from plugins about how to send to the game's stdin)
     let (stdin_sender, stdin_receiver) = mpsc::unbounded_channel::<String>();
+
+    // a stream to handle new GroupedRegexMatches
+    let (new_matcher_sender, mut new_matcher_receiver) = mpsc::unbounded_channel::<GroupedRegexMatches>();
 
     let plugins = plugins::scan().await;
     let mut instances = vec![];
+    let plugin_channels = PluginChannels { stdin: stdin_sender, matchers: new_matcher_sender };
     for plugin_config in plugins {
-        let instance = match PluginInstance::start(plugin_config, stdin_sender.clone()) {
+        let instance = match PluginInstance::start(plugin_config, &plugin_channels) {
             Ok(i) => i,
             Err(x) => {
                 warn!("Plugin failed to start: {:?}", x);
@@ -170,106 +174,131 @@ async fn main() {
     let mut lines = reader.lines();
 
     let log_matcher = Regex::new("^\\[[\\d\\.\\-:]+\\]\\[\\s*(?P<index>\\d+)\\](?P<body>.+)$").unwrap();
+
+    // a stream to handle sending rpc messages to plugins
+    let (plugin_rpc_sender, mut plugin_rpc_receiver) = mpsc::unbounded_channel::<rpc::Message>();
     
-    let grouped_regex_matchers: Vec<Box<dyn GroupedRegexMatcher>> = vec![Box::new(ChatRegexMatcher), Box::new(JoinRegexMatcher)];
+    let grouped_regex_matchers: Vec<Arc<dyn GroupedRegexMatcher + Send>> = vec![
+        Arc::new(ChatRegexMatcher(plugin_rpc_sender.clone())),
+        Arc::new(ConnectRegexMatcher(plugin_rpc_sender.clone()))
+    ];
     let mut grouped_regex_instances: Vec<GroupedRegexMatches<'_>> = vec![];
 
     // repeatedly listen to stdout for new content
-    while let Some(line) = lines.next_line().await.unwrap() {
-        if is_server_verbose {
-            debug!(":: {}", line);
-        }
+    loop {
+        tokio::select! {
+            Ok(Some(line)) = lines.next_line() => {
+                // line from the game server
 
-        let log_match = match log_matcher.captures(line.as_str()) {
-            Some(x) => x,
-            None => continue
-        };
+                if is_server_verbose {
+                    debug!(":: {}", line);
+                }
+        
+                let log_match = match log_matcher.captures(line.as_str()) {
+                    Some(x) => x,
+                    None => continue
+                };
+        
+                let index: i32 = (&log_match["index"]).parse().unwrap();
+                let body = &log_match["body"];
+        
+                // handle each grouped regex instance, and break if one is matched
+                let mut i: usize = 0;
+                for instance in grouped_regex_instances.iter_mut() {
+                    let index_matches = match instance.index {
+                        Some(n) => index == n,
+                        None => true
+                    };
 
-        let index: i32 = (&log_match["index"]).parse().unwrap();
-        let body = &log_match["body"];
+                    if index_matches {
+                        let regexes = instance.matcher.regexes();
+                        let next_regex = &regexes[instance.captures.len()];
+        
+                        let capture_names = next_regex.capture_names();
+                        if let Some(captures) = next_regex.captures(body) {
+                            // update last
+                            instance.last = Instant::now();
 
-        // handle each grouped regex instance, and break if one is matched
-        let mut i: usize = 0;
-        for instance in grouped_regex_instances.iter_mut() {
-            if index == instance.index {
-                let regexes = instance.matcher.regexes();
-                let next_regex = &regexes[instance.captures.len()];
-
-                let capture_names = next_regex.capture_names();
-                if let Some(captures) = next_regex.captures(body) {
-                    // clone out captures into a map for ownership
-                    let mut map = HashMap::new();
-
-                    for group_name in capture_names {
-                        let group_name = match group_name {
-                            Some(x) => x,
-                            None => continue
-                        };
-                        let m = captures.name(group_name).unwrap().as_str().clone();
-                        map.insert(String::from(group_name), String::from(m));
-                    }
-                    
-                    // we have our map, update the instance
-                    instance.captures.push(map);
-
-                    // if our captures count is >= the regex count, our job here is done:
-                    // submit the rpc message
-                    if instance.captures.len() >= regexes.len() {
-                        let rpc_message = instance.matcher.convert(&instance).await;
-
-                        for instance in instances.iter() {
-                            instance.stdin.send(serde_json::to_string(&rpc_message).unwrap()).unwrap();
+                            // clone out captures into a map for ownership
+                            let mut map = HashMap::new();
+        
+                            for group_name in capture_names {
+                                let group_name = match group_name {
+                                    Some(x) => x,
+                                    None => continue
+                                };
+                                let m = captures.name(group_name).unwrap().as_str().clone();
+                                map.insert(String::from(group_name), String::from(m));
+                            }
+                            
+                            // we have our map, update the instance
+                            instance.captures.push(map);
+        
+                            // if our captures count is >= the regex count, our job here is done:
+                            // submit the rpc message
+                            if instance.captures.len() >= regexes.len() {
+                                instance.matcher.complete(&instance).await;
+                                break;
+                            }
                         }
-
-                        break;
                     }
+        
+                    i += 1;
+                }
+        
+                // loop terminated early somewhere, so we remove it at its index
+                if i < grouped_regex_instances.len() {
+                    grouped_regex_instances.remove(i);
+                    continue;
+                }
+        
+                // handle each grouped regex matcher, trying to start new instances if possible
+                for matcher in grouped_regex_matchers.iter() {
+                    let matcher_regexes = matcher.regexes();
+                    let first_regex = &matcher_regexes[0];
+        
+                    let capture_names = first_regex.capture_names();
+                    if let Some(captures) = first_regex.captures(body) {
+                        // effectively clone out captures into a map for ownership
+                        let mut map = HashMap::new();
+        
+                        for group_name in capture_names {
+                            let group_name = match group_name {
+                                Some(x) => x,
+                                None => continue
+                            };
+                            let m = captures.name(group_name).unwrap().as_str().clone();
+                            map.insert(String::from(group_name), String::from(m));
+                        }
+        
+                        // we match with the first regex, so let's start making a new instance
+                        let instance = GroupedRegexMatches { index: Some(index), matcher: matcher.clone(), captures: RegexCaptures::new(vec![map]), last: Instant::now(), timeout: Duration::from_secs(1) };
+        
+                        // if the grouped regex actually only has one regex, we can early-terminate and avoid adding it to the array
+                        if matcher_regexes.len() == 1 {
+                            matcher.complete(&instance).await;
+                            break;
+                        } else {
+                            // add it to the instances array
+                            grouped_regex_instances.push(instance);
+                        }
+                    }
+                }
+                
+                // clean up expired regex matchers if their last instant exceeds some timeout
+                grouped_regex_instances.retain(|instance| instance.last + instance.timeout < Instant::now());
+            }
+            Some(rpc_message) = plugin_rpc_receiver.recv() => {
+                // message from plugin rpc receiver
+
+                for instance in instances.iter() {
+                    instance.stdin.send(serde_json::to_string(&rpc_message).unwrap()).unwrap();
                 }
             }
+            Some(matcher_instance) = new_matcher_receiver.recv() => {
+                // matcher from any plugin's new matcher async fn
 
-            i += 1;
-        }
-
-        // loop terminated early somewhere, so we remove it at its index
-        if i < grouped_regex_instances.len() {
-            grouped_regex_instances.remove(i);
-            continue;
-        }
-
-        // handle each grouped regex matcher, trying to start new instances if possible
-        for matcher in grouped_regex_matchers.iter() {
-            let matcher_regexes = matcher.regexes();
-            let first_regex = &matcher_regexes[0];
-
-            let capture_names = first_regex.capture_names();
-            if let Some(captures) = first_regex.captures(body) {
-                // effectively clone out captures into a map for ownership
-                let mut map = HashMap::new();
-
-                for group_name in capture_names {
-                    let group_name = match group_name {
-                        Some(x) => x,
-                        None => continue
-                    };
-                    let m = captures.name(group_name).unwrap().as_str().clone();
-                    map.insert(String::from(group_name), String::from(m));
-                }
-
-                // we match with the first regex, so let's start making a new instance
-                let instance = GroupedRegexMatches { index, matcher, captures: vec![map] };
-
-                // if the grouped regex actually only has one regex, we can early-terminate and avoid adding it to the array
-                if matcher_regexes.len() == 1 {
-                    let rpc_message = matcher.convert(&instance).await;
-
-                    for instance in instances.iter() {
-                        instance.stdin.send(serde_json::to_string(&rpc_message).unwrap()).unwrap();
-                    }
-
-                    break;
-                } else {
-                    // add it to the instances array
-                    grouped_regex_instances.push(instance);
-                }
+                grouped_regex_instances.push(matcher_instance);
             }
         }
     }

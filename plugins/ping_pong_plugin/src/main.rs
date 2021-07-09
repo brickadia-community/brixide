@@ -14,14 +14,14 @@ async fn main() {
 
     while let Some(message) = receiver.recv().await {
         match message.method() {
-            Some("join") => {
-                // a player joins
+            Some("connect") => {
+                // a player is connecting
                 let player: Player = match message {
                     rpc::Message::Notification { params, .. } => serde_json::from_value(params.unwrap()).unwrap(),
                     _ => continue
                 };
 
-                Plugin::broadcast(format!("Welcome, {}! Your UUID is {}", player.name, player.uuid).as_str());
+                Plugin::broadcast(format!("{} is connecting! Their UUID is {}", player.name, player.uuid).as_str());
             },
             Some("chat") => {
                 // a user chats
