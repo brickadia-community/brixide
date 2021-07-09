@@ -4,5 +4,5 @@ use uuid::Uuid;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Player {
     pub name: String,
-    pub uuid: Uuid
+    pub uuid: Uuid,
 }

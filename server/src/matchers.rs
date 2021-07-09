@@ -4,14 +4,14 @@ use async_trait::async_trait;
 use lazy_static::lazy_static;
 use log::info;
 use plugin::{payloads::*, player::Player, rpc};
-use regex::{Captures, Match, Regex};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::{mpsc, oneshot}, time::Instant};
+use tokio::{sync::mpsc, time::Instant};
 use uuid::Uuid;
 
 lazy_static! {
-    static ref CHAT_REGEX: Vec<Regex> = vec![Regex::new("LogChat: (?P<user>[^:]+): (?P<message>.*)$").unwrap()];
-
+    static ref CHAT_REGEX: Vec<Regex> =
+        vec![Regex::new("LogChat: (?P<user>[^:]+): (?P<message>.*)$").unwrap()];
     static ref JOIN_REGEX: Vec<Regex> = vec![
         Regex::new("^LogServerList: Auth payload valid\\. Result:$").unwrap(),
         Regex::new("^LogServerList: UserName: (?P<user>.+)$").unwrap(),
@@ -23,7 +23,7 @@ lazy_static! {
 /// A wrapper around the captures of a regex.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RegexCaptures {
-    vec: Vec<HashMap<String, String>>
+    vec: Vec<HashMap<String, String>>,
 }
 
 impl RegexCaptures {
@@ -34,7 +34,7 @@ impl RegexCaptures {
     pub fn at(&self, ind: usize, key: &str) -> Option<&str> {
         match self.vec.get(ind) {
             Some(map) => map.get(key.into()).map(String::as_str),
-            None => None
+            None => None,
         }
     }
 
@@ -62,7 +62,7 @@ pub struct GroupedRegexMatches<'a> {
     pub matcher: Arc<dyn 'a + GroupedRegexMatcher + Send>,
     pub captures: RegexCaptures,
     pub last: Instant,
-    pub timeout: Duration
+    pub timeout: Duration,
 }
 
 impl fmt::Debug for GroupedRegexMatches<'_> {
@@ -79,7 +79,7 @@ impl fmt::Debug for GroupedRegexMatches<'_> {
 /// Runtime plugin regex.
 pub struct PluginRegexMatcher {
     pub regexes: Vec<Regex>,
-    pub capture_sender: mpsc::Sender<RegexCaptures>
+    pub capture_sender: mpsc::Sender<RegexCaptures>,
 }
 
 #[async_trait]
@@ -106,8 +106,12 @@ impl GroupedRegexMatcher for ConnectRegexMatcher {
     async fn complete(&self, instance: &GroupedRegexMatches<'_>) {
         let name = instance.captures.at(1, "user").unwrap();
         let uuid: Uuid = instance.captures.at(2, "id").unwrap().parse().unwrap();
-        let player = Player { name: name.into(), uuid };
-        let message = rpc::Message::notification("connect", Some(serde_json::to_value(player).unwrap()));
+        let player = Player {
+            name: name.into(),
+            uuid,
+        };
+        let message =
+            rpc::Message::notification("connect", Some(serde_json::to_value(player).unwrap()));
         self.0.send(message).unwrap();
     }
 }
@@ -122,9 +126,16 @@ impl GroupedRegexMatcher for ChatRegexMatcher {
     }
 
     async fn complete(&self, instance: &GroupedRegexMatches<'_>) {
-        let (user, message) = (instance.captures.at(0, "user").unwrap(), instance.captures.at(0, "message").unwrap());
+        let (user, message) = (
+            instance.captures.at(0, "user").unwrap(),
+            instance.captures.at(0, "message").unwrap(),
+        );
         info!("{}: {}", user, message);
-        let message = ChatPayload { user: user.into(), message: message.into() }.into();
+        let message = ChatPayload {
+            user: user.into(),
+            message: message.into(),
+        }
+        .into();
         self.0.send(message).unwrap();
     }
 }

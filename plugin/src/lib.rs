@@ -1,7 +1,10 @@
 use logging::PluginLogger;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::{io::{self, AsyncBufReadExt, BufReader}, sync::mpsc::{self, UnboundedReceiver}};
+use tokio::{
+    io::{self, AsyncBufReadExt, BufReader},
+    sync::mpsc::{self, UnboundedReceiver},
+};
 
 pub mod logging;
 pub mod payloads;
@@ -14,7 +17,7 @@ pub struct Plugin {
     author: String,
     description: String,
     #[serde(default = "Plugin::default_target")]
-    target: String
+    target: String,
 }
 
 static PLUGIN_LOGGER: PluginLogger = PluginLogger;
@@ -23,8 +26,7 @@ impl Plugin {
     // static methods
 
     pub fn use_plugin_logger() -> Result<(), log::SetLoggerError> {
-        log::set_logger(&PLUGIN_LOGGER)
-            .map(|()| log::set_max_level(log::LevelFilter::Debug))
+        log::set_logger(&PLUGIN_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Debug))
     }
 
     pub fn send(message: &rpc::Message) {
@@ -41,7 +43,7 @@ impl Plugin {
             while let Some(line) = lines.next_line().await.unwrap() {
                 let rpc_message: rpc::Message = match serde_json::from_str(line.as_str()) {
                     Ok(m) => m,
-                    Err(_) => continue
+                    Err(_) => continue,
                 };
 
                 sender.send(rpc_message).unwrap();
@@ -58,7 +60,10 @@ impl Plugin {
     // abstraction stuff
 
     pub fn broadcast(content: &str) {
-        Self::send(&rpc::Message::notification("broadcast", Some(json!(content))));
+        Self::send(&rpc::Message::notification(
+            "broadcast",
+            Some(json!(content)),
+        ));
     }
 
     pub fn writeln(line: &str) {

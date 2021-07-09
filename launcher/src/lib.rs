@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use std::process::{exit};
+use std::process::exit;
 
 use log::{error, info, warn};
 use reqwest::header;
@@ -18,7 +18,12 @@ pub const INSTALL_LOCATION: &str = "C:/Program Files/Brickadia";
 
 pub fn is_installed<'a>(_matches: &clap::ArgMatches<'a>) -> bool {
     #[cfg(target_os = "windows")]
-    return Path::new(_matches.value_of("install-location").unwrap_or(INSTALL_LOCATION)).exists();
+    return Path::new(
+        _matches
+            .value_of("install-location")
+            .unwrap_or(INSTALL_LOCATION),
+    )
+    .exists();
 
     #[cfg(not(target_os = "windows"))]
     return Path::new(LAUNCHER_PATH).exists();
@@ -28,7 +33,9 @@ pub fn is_installed<'a>(_matches: &clap::ArgMatches<'a>) -> bool {
 pub async fn install<'a>(_matches: &clap::ArgMatches<'a>) {
     // for windows installations, we can't programatically install the launcher, but we
     // can expect the user to already have it installed
-    let install_location = _matches.value_of("install-location").unwrap_or(INSTALL_LOCATION);
+    let install_location = _matches
+        .value_of("install-location")
+        .unwrap_or(INSTALL_LOCATION);
     if !Path::new(install_location).exists() {
         error!("Brickadia is not installed! Please install it from https://brickadia.com/download");
         exit(1);
@@ -55,7 +62,8 @@ pub async fn install<'a>(_matches: &clap::ArgMatches<'a>) {
 
     let mut file = File::create("launcher.tar.xz").expect("Failed to create launcher file");
     let bytes = response.bytes().await.unwrap();
-    file.write_all(&bytes[..]).expect("Failed to write to launcher file");
+    file.write_all(&bytes[..])
+        .expect("Failed to write to launcher file");
 
     info!("Downloaded launcher, extracting");
 

@@ -1,4 +1,7 @@
-use fern::{Dispatch, colors::{Color, ColoredLevelConfig}};
+use fern::{
+    colors::{Color, ColoredLevelConfig},
+    Dispatch,
+};
 
 #[tokio::main]
 async fn main() {
@@ -11,7 +14,8 @@ async fn main() {
 
     Dispatch::new()
         .format(move |out, message, record| {
-            out.finish(format_args!("{} {}",
+            out.finish(format_args!(
+                "{} {}",
                 format!(
                     "\x1B[{}m>>\x1B[0m",
                     colors.get_color(&record.level()).to_fg_str()

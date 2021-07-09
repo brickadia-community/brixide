@@ -1,7 +1,7 @@
 use log::Level;
 use serde::{Deserialize, Serialize};
 
-use crate::{Plugin, payloads::*, rpc};
+use crate::{payloads::*, rpc, Plugin};
 
 /// A wrapper for log::Level because it doesn't implement Serialize/Deserialize.
 #[derive(Serialize, Deserialize, Debug)]
@@ -10,7 +10,7 @@ pub enum LogSeverity {
     Info,
     Warn,
     Error,
-    Trace
+    Trace,
 }
 
 impl From<LogSeverity> for Level {
@@ -20,7 +20,7 @@ impl From<LogSeverity> for Level {
             LogSeverity::Info => Self::Info,
             LogSeverity::Warn => Self::Warn,
             LogSeverity::Error => Self::Error,
-            LogSeverity::Trace => Self::Trace
+            LogSeverity::Trace => Self::Trace,
         }
     }
 }
@@ -39,10 +39,14 @@ impl log::Log for PluginLogger {
                 Level::Info => LogSeverity::Info,
                 Level::Warn => LogSeverity::Warn,
                 Level::Error => LogSeverity::Error,
-                Level::Trace => LogSeverity::Trace
+                Level::Trace => LogSeverity::Trace,
             };
-            
-            let rpc_message: rpc::Message = LogPayload { severity, content: record.args().to_string() }.into();
+
+            let rpc_message: rpc::Message = LogPayload {
+                severity,
+                content: record.args().to_string(),
+            }
+            .into();
             Plugin::send(&rpc_message)
         }
     }

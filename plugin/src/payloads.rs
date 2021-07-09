@@ -15,14 +15,14 @@ pub enum RpcDeserializationError {
     #[error("no payload data available")]
     NoValue,
     #[error(transparent)]
-    JsonError(#[from] serde_json::Error)
+    JsonError(#[from] serde_json::Error),
 }
 
 /// A payload for sending log messages to the server.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LogPayload {
     pub severity: LogSeverity,
-    pub content: String
+    pub content: String,
 }
 
 impl From<LogPayload> for rpc::Message {
@@ -36,8 +36,10 @@ impl TryFrom<rpc::Message> for LogPayload {
 
     fn try_from(value: rpc::Message) -> Result<Self, Self::Error> {
         match value {
-            rpc::Message::Notification { params, .. } => Ok(serde_json::from_value(params.ok_or(RpcDeserializationError::NoValue)?)?),
-            _ => Err(RpcDeserializationError::WrongRpcType)
+            rpc::Message::Notification { params, .. } => Ok(serde_json::from_value(
+                params.ok_or(RpcDeserializationError::NoValue)?,
+            )?),
+            _ => Err(RpcDeserializationError::WrongRpcType),
         }
     }
 }
@@ -46,7 +48,7 @@ impl TryFrom<rpc::Message> for LogPayload {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ChatPayload {
     pub user: String,
-    pub message: String
+    pub message: String,
 }
 
 impl From<ChatPayload> for rpc::Message {
@@ -60,8 +62,10 @@ impl TryFrom<rpc::Message> for ChatPayload {
 
     fn try_from(value: rpc::Message) -> Result<Self, Self::Error> {
         match value {
-            rpc::Message::Notification { params, .. } => Ok(serde_json::from_value(params.ok_or(RpcDeserializationError::NoValue)?)?),
-            _ => Err(RpcDeserializationError::WrongRpcType)
+            rpc::Message::Notification { params, .. } => Ok(serde_json::from_value(
+                params.ok_or(RpcDeserializationError::NoValue)?,
+            )?),
+            _ => Err(RpcDeserializationError::WrongRpcType),
         }
     }
 }
