@@ -171,10 +171,8 @@ async fn main() {
 
     let log_matcher = Regex::new("^\\[[\\d\\.\\-:]+\\]\\[\\s*(?P<index>\\d+)\\](?P<body>.+)$").unwrap();
     
-    let regex_matchers = vec![ChatRegexMatcher];
-    let grouped_regex_matchers = vec![JoinRegexGroupMatcher];
-
-    let mut grouped_regex_instances: Vec<GroupedRegexMatches<'_, JoinRegexGroupMatcher>> = vec![];
+    let grouped_regex_matchers: Vec<Box<dyn GroupedRegexMatcher>> = vec![Box::new(ChatRegexMatcher), Box::new(JoinRegexMatcher)];
+    let mut grouped_regex_instances: Vec<GroupedRegexMatches<'_>> = vec![];
 
     // repeatedly listen to stdout for new content
     while let Some(line) = lines.next_line().await.unwrap() {
@@ -189,17 +187,6 @@ async fn main() {
 
         let index: i32 = (&log_match["index"]).parse().unwrap();
         let body = &log_match["body"];
-
-        // handle each regex matcher
-        for matcher in regex_matchers.iter() {
-            if let Some(captures) = matcher.regex().captures(body) {
-                let rpc_message = matcher.convert(captures).await;
-
-                for instance in instances.iter() {
-                    instance.stdin.send(serde_json::to_string(&rpc_message).unwrap()).unwrap();
-                }
-            }
-        }
 
         // handle each grouped regex instance, and break if one is matched
         let mut i: usize = 0;
@@ -250,7 +237,8 @@ async fn main() {
 
         // handle each grouped regex matcher, trying to start new instances if possible
         for matcher in grouped_regex_matchers.iter() {
-            let first_regex = &matcher.regexes()[0];
+            let matcher_regexes = matcher.regexes();
+            let first_regex = &matcher_regexes[0];
 
             let capture_names = first_regex.capture_names();
             if let Some(captures) = first_regex.captures(body) {
@@ -269,8 +257,19 @@ async fn main() {
                 // we match with the first regex, so let's start making a new instance
                 let instance = GroupedRegexMatches { index, matcher, captures: vec![map] };
 
-                // add it to the instances array
-                grouped_regex_instances.push(instance);
+                // if the grouped regex actually only has one regex, we can early-terminate and avoid adding it to the array
+                if matcher_regexes.len() == 1 {
+                    let rpc_message = matcher.convert(&instance).await;
+
+                    for instance in instances.iter() {
+                        instance.stdin.send(serde_json::to_string(&rpc_message).unwrap()).unwrap();
+                    }
+
+                    break;
+                } else {
+                    // add it to the instances array
+                    grouped_regex_instances.push(instance);
+                }
             }
         }
     }

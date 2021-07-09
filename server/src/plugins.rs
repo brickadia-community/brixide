@@ -105,6 +105,15 @@ impl PluginInstance {
                             }
                         }
                     },
+                    Some("writeln") => {
+                        // write a line directly to the server stdin
+                        if let rpc::Message::Notification { params, .. } = rpc_message {
+                            match params {
+                                Some(Value::String(str)) => server_stdin.send(str).unwrap(),
+                                _ => ()
+                            }
+                        }
+                    },
                     _ => ()
                 }
             }

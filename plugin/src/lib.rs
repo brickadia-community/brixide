@@ -58,8 +58,11 @@ impl Plugin {
     // abstraction stuff
 
     pub fn broadcast(content: &str) {
-        let notification = rpc::Message::notification("broadcast", Some(json!(content)));
-        Self::send(&notification);
+        Self::send(&rpc::Message::notification("broadcast", Some(json!(content))));
+    }
+
+    pub fn writeln(line: &str) {
+        Self::send(&rpc::Message::notification("writeln", Some(json!(line))));
     }
 
     // instance methods/constructors

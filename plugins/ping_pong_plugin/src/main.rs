@@ -21,20 +21,15 @@ async fn main() {
                     _ => continue
                 };
 
-                info!("A player has joined the game (name: {}, id: {})", player.name, player.uuid);
+                Plugin::broadcast(format!("Welcome, {}! Your UUID is {}", player.name, player.uuid).as_str());
             },
             Some("chat") => {
                 // a user chats
                 let payload: ChatPayload = message.try_into().unwrap();
 
-                match payload.message.as_str() {
-                    "ping" => {
-                        Plugin::broadcast("Pong!");
-                    },
-                    "pong" => {
-                        Plugin::broadcast("Ping!");
-                    },
-                    _ => ()
+                if payload.message.starts_with("writeln:") {
+                    let line = &payload.message[8..];
+                    Plugin::writeln(line);
                 }
             },
             _ => ()
